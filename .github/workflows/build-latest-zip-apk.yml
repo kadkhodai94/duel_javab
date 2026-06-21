@@ -1,10 +1,10 @@
-name: Build Latest Flutter ZIP APK
+name: Build Latest ZIP APK
 
 on:
   workflow_dispatch:
     inputs:
       zip_file:
-        description: "Optional: exact ZIP file name to build. Leave empty to auto-select latest ZIP."
+        description: "Optional exact ZIP filename. Leave empty to build latest ZIP automatically."
         required: false
         default: ""
 
@@ -20,15 +20,15 @@ permissions:
   contents: read
 
 jobs:
-  build-latest-zip:
+  build:
     name: Build APK From Latest ZIP
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     env:
-      WORK_DIR: _latest_zip_build
-      EXTRACT_DIR: _latest_zip_build/extracted
-      OUTPUT_DIR: _latest_zip_build/output
+      WORK_DIR: _build_latest_zip
+      EXTRACT_DIR: _build_latest_zip/extracted
+      OUTPUT_DIR: _build_latest_zip/output
 
     steps:
       - name: Checkout repository
@@ -36,13 +36,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show repository files
+      - name: Show ZIP files
+        shell: bash
         run: |
+          set -euo pipefail
           echo "Repository root:"
           ls -lah
 
           echo ""
-          echo "ZIP files found:"
+          echo "ZIP files:"
           find . -maxdepth 1 -type f -name "*.zip" -printf "%f\n" | sort || true
 
       - name: Select latest ZIP
@@ -51,11 +53,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          MANUAL_ZIP="${{ github.event.inputs.zip_file || '' }}"
+          MANUAL_ZIP="${{ inputs.zip_file }}"
 
           if [ -n "$MANUAL_ZIP" ]; then
             if [ ! -f "$MANUAL_ZIP" ]; then
-              echo "ERROR: Manual ZIP not found: $MANUAL_ZIP"
+              echo "ERROR: ZIP file not found: $MANUAL_ZIP"
               exit 1
             fi
 
@@ -65,76 +67,76 @@ jobs:
 
             if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
               echo "ERROR: No ZIP file found in repository root."
-              echo "Put your Flutter project ZIP in the root of the repository."
               exit 1
             fi
 
-            TMP_LIST="$(mktemp)"
+            LIST_FILE="$(mktemp)"
 
             for ZIP in "${ZIP_FILES[@]}"; do
-              COMMIT_TS="$(git log -1 --format=%ct -- "$ZIP" 2>/dev/null || echo 0)"
+              COMMIT_TIME="$(git log -1 --format=%ct -- "$ZIP" 2>/dev/null || echo 0)"
 
-              if [ -z "$COMMIT_TS" ]; then
-                COMMIT_TS=0
+              if [ -z "$COMMIT_TIME" ]; then
+                COMMIT_TIME=0
               fi
 
-              VERSION_TEXT="$(echo "$ZIP" | grep -oE 'v?[0-9]+([._-][0-9]+){1,5}' | tail -n 1 || true)"
+              VERSION_TEXT="$(echo "$ZIP" | grep -oE 'v?[0-9]+([._-][0-9]+){1,6}' | tail -n 1 || true)"
 
               if [ -z "$VERSION_TEXT" ]; then
-                VERSION_SCORE="000000000000000000"
+                VERSION_SCORE="000000000000000000000"
               else
-                VERSION_SCORE="$(echo "$VERSION_TEXT" \
-                  | sed 's/^v//' \
-                  | tr '._-' ' ' \
-                  | awk '{
-                      for (i=1; i<=6; i++) {
-                        if ($i == "") $i=0;
-                        printf "%03d", $i;
-                      }
-                    }')"
+                VERSION_SCORE="$(echo "$VERSION_TEXT" | sed 's/^v//' | tr '._-' ' ' | awk '{
+                  for (i = 1; i <= 7; i++) {
+                    if ($i == "") {
+                      $i = 0
+                    }
+                    printf "%03d", $i
+                  }
+                }')"
               fi
 
-              printf "%s\t%s\t%s\n" "$COMMIT_TS" "$VERSION_SCORE" "$ZIP" >> "$TMP_LIST"
+              printf "%s\t%s\t%s\n" "$VERSION_SCORE" "$COMMIT_TIME" "$ZIP" >> "$LIST_FILE"
             done
 
             echo "ZIP selection table:"
-            cat "$TMP_LIST"
+            cat "$LIST_FILE"
 
-            SELECTED_ZIP="$(sort -k1,1n -k2,2n "$TMP_LIST" | tail -n 1 | cut -f3)"
+            SELECTED_ZIP="$(sort -k1,1n -k2,2n "$LIST_FILE" | tail -n 1 | cut -f3)"
           fi
 
           ZIP_BASE="$(basename "$SELECTED_ZIP" .zip)"
           SAFE_NAME="$(echo "$ZIP_BASE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
 
           echo "Selected ZIP: $SELECTED_ZIP"
+
+          echo "SELECTED_ZIP=$SELECTED_ZIP" >> "$GITHUB_ENV"
           echo "ZIP_BASE=$ZIP_BASE" >> "$GITHUB_ENV"
           echo "SAFE_NAME=$SAFE_NAME" >> "$GITHUB_ENV"
-          echo "SELECTED_ZIP=$SELECTED_ZIP" >> "$GITHUB_ENV"
 
           echo "selected_zip=$SELECTED_ZIP" >> "$GITHUB_OUTPUT"
           echo "safe_name=$SAFE_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare clean build folders
+      - name: Prepare folders
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf "$WORK_DIR"
-          mkdir -p "$EXTRACT_DIR" "$OUTPUT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+          mkdir -p "$OUTPUT_DIR"
 
       - name: Extract selected ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Extracting: $SELECTED_ZIP"
+          echo "Extracting ZIP:"
+          echo "$SELECTED_ZIP"
+
           unzip -q "$SELECTED_ZIP" -d "$EXTRACT_DIR"
 
-          echo "Extracted files:"
-          find "$EXTRACT_DIR" -maxdepth 3 -type f | sed 's#^#- #' | head -n 80
+          echo "Extracted preview:"
+          find "$EXTRACT_DIR" -maxdepth 3 -type f | head -n 80
 
       - name: Find Flutter project
-        id: find_project
         shell: bash
         run: |
           set -euo pipefail
@@ -143,19 +145,17 @@ jobs:
 
           if [ -z "$PUBSPEC_PATH" ]; then
             echo "ERROR: pubspec.yaml not found inside ZIP."
-            echo "The ZIP must contain a Flutter project."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PUBSPEC_PATH")"
 
-          echo "Flutter project found at: $PROJECT_DIR"
+          echo "Flutter project found:"
+          echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Read app version from pubspec
-        id: app_version
+      - name: Read Flutter version
         shell: bash
         run: |
           set -euo pipefail
@@ -168,11 +168,11 @@ jobs:
             BUILD_NAME="1.0.0"
             BUILD_NUMBER="1"
           else
-            RAW_VERSION="$(echo "$VERSION_LINE" | sed 's/version:[[:space:]]*//g' | tr -d '"'"'"'")"
+            RAW_VERSION="$(echo "$VERSION_LINE" | sed -E "s/^version:[[:space:]]*//; s/[\"']//g")"
 
             if echo "$RAW_VERSION" | grep -q "+"; then
-              BUILD_NAME="$(echo "$RAW_VERSION" | cut -d+ -f1)"
-              BUILD_NUMBER="$(echo "$RAW_VERSION" | cut -d+ -f2)"
+              BUILD_NAME="$(echo "$RAW_VERSION" | cut -d "+" -f 1)"
+              BUILD_NUMBER="$(echo "$RAW_VERSION" | cut -d "+" -f 2)"
             else
               BUILD_NAME="$RAW_VERSION"
               BUILD_NUMBER="1"
@@ -187,14 +187,10 @@ jobs:
             BUILD_NUMBER="1"
           fi
 
-          echo "Build name: $BUILD_NAME"
-          echo "Build number: $BUILD_NUMBER"
-
           echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
-          echo "build_name=$BUILD_NAME" >> "$GITHUB_OUTPUT"
-          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "App version: $BUILD_NAME+$BUILD_NUMBER"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -209,7 +205,9 @@ jobs:
           cache: true
 
       - name: Flutter doctor
-        run: flutter doctor -v
+        shell: bash
+        run: |
+          flutter doctor -v
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -234,14 +232,14 @@ jobs:
             echo "Android folder exists."
           fi
 
-      - name: Get Flutter dependencies
+      - name: Install dependencies
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -euo pipefail
           flutter pub get
 
-      - name: Clean previous builds
+      - name: Clean project
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -265,7 +263,7 @@ jobs:
             --build-name="$BUILD_NAME" \
             --build-number="$BUILD_NUMBER"
 
-      - name: Prepare final APK output
+      - name: Prepare final APK
         shell: bash
         run: |
           set -euo pipefail
@@ -273,7 +271,7 @@ jobs:
           APK_SOURCE="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK_SOURCE" ]; then
-            echo "ERROR: Release APK not found."
+            echo "ERROR: APK not found."
             find "$PROJECT_DIR/build" -type f -name "*.apk" || true
             exit 1
           fi
@@ -282,10 +280,10 @@ jobs:
 
           cp "$APK_SOURCE" "$FINAL_APK"
 
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
+
           echo "Final APK:"
           ls -lah "$FINAL_APK"
-
-          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
 
       - name: Create build info
         shell: bash
@@ -295,17 +293,18 @@ jobs:
           INFO_FILE="$OUTPUT_DIR/build-info.txt"
 
           {
-            echo "App ZIP: $SELECTED_ZIP"
-            echo "App version: $BUILD_NAME+$BUILD_NUMBER"
-            echo "APK file: $(basename "$FINAL_APK")"
-            echo "Git branch: $GITHUB_REF_NAME"
-            echo "Git commit: $GITHUB_SHA"
+            echo "Selected ZIP: $SELECTED_ZIP"
+            echo "Flutter project: $PROJECT_DIR"
+            echo "Version: $BUILD_NAME+$BUILD_NUMBER"
+            echo "APK: $(basename "$FINAL_APK")"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Commit: $GITHUB_SHA"
             echo "Build date UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
           } > "$INFO_FILE"
 
           cat "$INFO_FILE"
 
-      - name: Upload only latest APK artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.SAFE_NAME }}-v${{ env.BUILD_NAME }}-${{ env.BUILD_NUMBER }}-apk
